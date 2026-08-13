@@ -41,6 +41,11 @@ jobs:
         shell: bash
         run: |
           VER=${GITHUB_REF#refs/tags/}
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+              export PLUGIN_BASE_TAG=latest
+          else
+              export PLUGIN_BASE_TAG=master
+          fi
           PLUGIN_USER=ghcr.io/taldx123
           docker login ghcr.io --username ${{ github.actor }} \
                        --password-stdin <<< "${{ secrets.GITHUB_TOKEN }}"
