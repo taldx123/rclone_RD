@@ -1,0 +1,10 @@
+
+services:
+  dev:
+    image: golang:1.25
+    volumes:
+      - .:/go/src/github.com/rclone/rclone
+    working_dir: /go/src/github.com/rclone/rclone
+    entrypoint: /bin/bash
+    environment:
+      - CGO_ENABLED=0
