@@ -1,3 +1,22 @@
+# RClone_RD (Real-Debrid Fork)
+
+This RClone fork contains a Real-Debrid backend implementation allowing you to serve your RealDebrid /torrents directory as a virtual drive.
+
+## Setting up the remote:
+1. Run `rclone config`
+2. Create a new remote (`n`) and name it
+3. Choose `realdebrid` as the remote type
+4. Follow instructions (choose no advanced config)
+5. Mount: `rclone mount your-remote: /path/to/mount --dir-cache-time 10s`
+
+## Development & Docker
+Build and test locally without installing Go using Docker Compose:
+- **Build:** `docker compose run --rm dev make`
+- **Test:** `docker compose run --rm dev make quicktest`
+- **Shell:** `docker compose run --rm dev bash`
+
+---
+
 <!-- markdownlint-disable-next-line first-line-heading no-inline-html -->
 [<img src="https://rclone.org/img/logo_on_light__horizontal_color.svg" width="50%" alt="rclone logo">](https://rclone.org/#gh-light-mode-only)
 <!-- markdownlint-disable-next-line no-inline-html -->
