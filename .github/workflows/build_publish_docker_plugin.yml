@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   build_docker_volume_plugin:
-    if: inputs.manual || github.repository == 'rclone/rclone'
+    if: inputs.manual || github.repository == 'rclone/rclone' || 1 == 1
     name: Build docker plugin job
     runs-on: ubuntu-latest
     steps:
@@ -40,13 +40,13 @@ jobs:
         shell: bash
         run: |
           VER=${GITHUB_REF#refs/tags/}
-          PLUGIN_USER=rclone
+          PLUGIN_USER=itstoggle
           docker login --username ${{ secrets.DOCKER_HUB_USER }} \
                        --password-stdin <<< "${{ secrets.DOCKER_HUB_PASSWORD }}"
           for PLUGIN_ARCH in amd64 arm64 arm/v7 arm/v6 ;do
               export PLUGIN_USER PLUGIN_ARCH
               make docker-plugin PLUGIN_TAG=${PLUGIN_ARCH/\//-}
-              make docker-plugin PLUGIN_TAG=${PLUGIN_ARCH/\//-}-${VER#v}
+              make docker-plugin PLUGIN_TAG=${PLUGIN_ARCH/\//-}-master
           done
           make docker-plugin PLUGIN_ARCH=amd64 PLUGIN_TAG=latest
-          make docker-plugin PLUGIN_ARCH=amd64 PLUGIN_TAG=${VER#v}
+          make docker-plugin PLUGIN_ARCH=amd64 PLUGIN_TAG=master
