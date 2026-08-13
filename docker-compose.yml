@@ -1,7 +1,7 @@
 
 services:
   dev:
-    image: golang:1.25
+    image: golang:alpine
     volumes:
       - .:/go/src/github.com/rclone/rclone
     working_dir: /go/src/github.com/rclone/rclone
