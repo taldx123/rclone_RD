@@ -9,6 +9,7 @@ on:
   push:
     branches:
       - master
+      - v1.75.0-base
     tags:
       - '**'
   workflow_dispatch:
