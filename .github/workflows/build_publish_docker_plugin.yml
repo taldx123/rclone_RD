@@ -16,10 +16,11 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   build_docker_volume_plugin:
-    if: inputs.manual || github.repository == 'rclone/rclone' || 1 == 1
+    if: inputs.manual || github.repository == 'taldx123/rclone_RD'
     name: Build docker plugin job
     runs-on: ubuntu-latest
     steps:
@@ -40,9 +41,9 @@ jobs:
         shell: bash
         run: |
           VER=${GITHUB_REF#refs/tags/}
-          PLUGIN_USER=taldx123
-          docker login --username ${{ secrets.DOCKER_HUB_USER }} \
-                       --password-stdin <<< "${{ secrets.DOCKER_HUB_PASSWORD }}"
+          PLUGIN_USER=ghcr.io/taldx123
+          docker login ghcr.io --username ${{ github.actor }} \
+                       --password-stdin <<< "${{ secrets.GITHUB_TOKEN }}"
           for PLUGIN_ARCH in amd64 arm64 arm/v7 arm/v6 ;do
               export PLUGIN_USER PLUGIN_ARCH
               make docker-plugin PLUGIN_TAG=${PLUGIN_ARCH/\//-}
