@@ -40,7 +40,7 @@ jobs:
         shell: bash
         run: |
           VER=${GITHUB_REF#refs/tags/}
-          PLUGIN_USER=itstoggle
+          PLUGIN_USER=taldx123
           docker login --username ${{ secrets.DOCKER_HUB_USER }} \
                        --password-stdin <<< "${{ secrets.DOCKER_HUB_PASSWORD }}"
           for PLUGIN_ARCH in amd64 arm64 arm/v7 arm/v6 ;do
