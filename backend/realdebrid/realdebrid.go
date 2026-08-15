@@ -607,7 +607,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 		Method: method,
 		Path:   path,
 		MultipartParams: url.Values{
-		"files": {selectedFilesStr},
+			"files": {selectedFilesStr},
 		},
 		Parameters: f.baseParams(),
 	}
