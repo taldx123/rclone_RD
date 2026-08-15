@@ -86,9 +86,9 @@ func init() {
 			Default: "",
 		}, {
 			Name:     "download_mode",
-			Help:     `please choose which RealDebrid directory to serve: For the /downloads page, type "downloads". For the /torrents page, type "f.torrents". Default: "f.torrents"`,
+			Help:     `please choose which RealDebrid directory to serve: For the /downloads page, type "downloads". For the /torrents page, type "torrents". Default: "torrents"`,
 			Advanced: true,
-			Default:  "f.torrents",
+			Default:  "torrents",
 		}, {
 			Name:     "folder_mode",
 			Help:     `please choose wether files should be grouped in torrent folders, or all files should be displayed in the root directory. For all files in root type "files", for folder structure type "folders". Default: "folders"`,
@@ -270,7 +270,7 @@ func (f *Fs) listTorrentStatusPage(ctx context.Context) ([]api.Item, error) {
 		params.Set("page", strconv.Itoa(page))
 		opts := rest.Opts{
 			Method:     "GET",
-			Path:       "/f.torrents",
+			Path:       "/torrents",
 			Parameters: params,
 		}
 		var partialresult []api.Item
@@ -529,7 +529,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 	fmt.Println("Redownloading dead torrent: " + torrent.Name)
 	//Get dead torrent file and hash info
 	var method = "GET"
-	var path = "/f.torrents/info/" + torrent.ID
+	var path = "/torrents/info/" + torrent.ID
 	var opts = rest.Opts{
 		Method:     method,
 		Path:       path,
@@ -575,7 +575,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 		}
 	}
 	//Add torrent again
-	path = "/f.torrents/addMagnet"
+	path = "/torrents/addMagnet"
 	method = "POST"
 	opts = rest.Opts{
 		Method: method,
@@ -587,7 +587,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 	}
 	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
 	method = "GET"
-	path = "/f.torrents/info/" + torrent.ID
+	path = "/torrents/info/" + torrent.ID
 	opts = rest.Opts{
 		Method:     method,
 		Path:       path,
@@ -601,7 +601,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 		tries += 1
 	}
 	//Select the same files again
-	path = "/f.torrents/selectFiles/" + torrent.ID
+	path = "/torrents/selectFiles/" + torrent.ID
 	method = "POST"
 	opts = rest.Opts{
 		Method: method,
@@ -692,7 +692,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				}
 
 				if time.Now().Unix()-f.lastcheck > interval && !printed {
-					fs.Infof(f, "Last update more than 15min ago. Updating links and f.torrents.")
+					fs.Infof(f, "Last update more than 15min ago. Updating links and torrents.")
 					printed = true
 				}
 
@@ -709,8 +709,8 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			f.mu.Lock()
 			f.cached = newcached
 			f.mu.Unlock()
-			//get f.torrents
-			path = "/f.torrents"
+			//get torrents
+			path = "/torrents"
 			opts = rest.Opts{
 				Method:     method,
 				Path:       path,
@@ -758,7 +758,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			f.mu.Lock()
 			f.torrents = newtorrents
 			f.mu.Unlock()
-			//Handle dead f.torrents
+			//Handle dead torrents
 			for i, torrent := range f.torrents {
 				broken := false
 				for _, TorrentID := range f.brokenTorrents {
