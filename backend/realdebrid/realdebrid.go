@@ -69,9 +69,9 @@ var (
 	}
 )
 
-//Global lists of recieved content.
-//Realdebrid content is provided in pages with 100 items per page.
-//To limit api calls all pages are stored here and are only updated on changes in the total length
+// Global lists of recieved content.
+// Realdebrid content is provided in pages with 100 items per page.
+// To limit api calls all pages are stored here and are only updated on changes in the total length
 const interval int64 = 15 * 60
 
 // Register with Fs
@@ -141,7 +141,7 @@ type Fs struct {
 	mu                sync.Mutex
 	cached            []api.Item
 	torrents          []api.Item
-	broken_torrents   []string
+	brokenTorrents    []string
 	lastcheck         int64
 	torrentStatuses   map[string]string
 	torrentStatusBase bool
@@ -159,7 +159,7 @@ type Object struct {
 	mimeType    string    // Mime type of object
 	url         string    // URL to download file
 	TorrentHash string    // Torrent Hash
-	OriginalUrl string    // Original link
+	OriginalURL string    // Original link
 }
 
 // ------------------------------------------------------------
@@ -283,10 +283,12 @@ func (f *Fs) listTorrentStatusPage(ctx context.Context) ([]api.Item, error) {
 			fs.Debugf(f, "RealDebrid API error: GET /torrents page=%d limit=100: %v", page, err)
 			return nil, err
 		}
-		
+
 		totalcount := 0
-		if tc := resp.Header.Get("X-Total-Count"); tc != "" {
-			totalcount, _ = strconv.Atoi(tc)
+		if resp != nil {
+			if tc := resp.Header.Get("X-Total-Count"); tc != "" {
+				totalcount, _ = strconv.Atoi(tc)
+			}
 		}
 
 		allItems = append(allItems, partialresult...)
@@ -352,12 +354,12 @@ func (f *Fs) changeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			f.torrentStatuses = current
 			f.torrentStatusBase = true
 			f.mu.Unlock()
-			
+
 			if downloadedTransitions > 0 {
 				fs.Infof(f, "RealDebrid torrent polling detected downloaded torrent(s): count=%d", downloadedTransitions)
 				// Force next listAll to hit the API by resetting lastcheck
-				f.lastcheck = 0 
-				
+				f.lastcheck = 0
+
 				notifyFunc("", fs.EntryDirectory)
 				if f.opt.SharedFolder == "folders" {
 					notifyFunc("shows", fs.EntryDirectory)
@@ -397,9 +399,9 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 
 	f := &Fs{
-		name:  name,
-		root:  root,
-		opt:   *opt,
+		name:            name,
+		root:            root,
+		opt:             *opt,
 		srv:             rest.NewClient(client).SetRoot(rootURL),
 		pacer:           fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 		torrentStatuses: make(map[string]string),
@@ -508,7 +510,7 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 }
 
 // Redownload a dead torrent
-func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloaded_torrent api.Item) {
+func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloadedTorrent api.Item) {
 	fmt.Println("Redownloading dead torrent: " + torrent.Name)
 	//Get dead torrent file and hash info
 	var method = "GET"
@@ -519,14 +521,14 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 		Parameters: f.baseParams(),
 	}
 	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
-	var selected_files []int64
-	var dead_torrent_id = torrent.ID
+	var selectedFiles []int64
+	var deadTorrentID = torrent.ID
 	for _, file := range torrent.Files {
 		if file.Selected == 1 {
-			selected_files = append(selected_files, file.ID)
+			selectedFiles = append(selectedFiles, file.ID)
 		}
 	}
-	var selected_files_str = strings.Trim(strings.Join(strings.Fields(fmt.Sprint(selected_files)), ","), "[]")
+	var selectedFiles_str = strings.Trim(strings.Join(strings.Fields(fmt.Sprint(selectedFiles)), ","), "[]")
 	//Delete old download links
 	for _, link := range torrent.Links {
 		for i, cachedfile := range f.cached {
@@ -540,16 +542,16 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 				var resp *http.Response
 				var result api.Response
 				var retries = 0
-				var err_code = 0
+				var errCode = 0
 				resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
 				if resp != nil {
-					err_code = resp.StatusCode
+					errCode = resp.StatusCode
 				}
-				for err_code == 429 && retries <= 5 {
+				for errCode == 429 && retries <= 5 {
 					time.Sleep(time.Duration(2) * time.Second)
 					resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
 					if resp != nil {
-						err_code = resp.StatusCode
+						errCode = resp.StatusCode
 					}
 					retries += 1
 				}
@@ -590,13 +592,13 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 		Method: method,
 		Path:   path,
 		MultipartParams: url.Values{
-			"files": {selected_files_str},
+			"files": {selectedFiles_str},
 		},
 		Parameters: f.baseParams(),
 	}
 	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
 	//Delete the old torrent
-	path = "/torrents/delete/" + dead_torrent_id
+	path = "/torrents/delete/" + deadTorrentID
 	method = "DELETE"
 	opts = rest.Opts{
 		Method:     method,
@@ -608,10 +610,10 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 	f.mu.Lock()
 	f.lastcheck = time.Now().Unix() - interval
 	f.mu.Unlock()
-	for i, TorrentID := range f.broken_torrents {
-		if dead_torrent_id == TorrentID {
-			f.broken_torrents[i] = f.broken_torrents[len(f.broken_torrents)-1]
-			f.broken_torrents = f.broken_torrents[:len(f.broken_torrents)-1]
+	for i, TorrentID := range f.brokenTorrents {
+		if deadTorrentID == TorrentID {
+			f.brokenTorrents[i] = f.brokenTorrents[len(f.brokenTorrents)-1]
+			f.brokenTorrents = f.brokenTorrents[:len(f.brokenTorrents)-1]
 		}
 	}
 	return torrent
@@ -742,10 +744,9 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			f.torrents = newtorrents
 			f.mu.Unlock()
 			//Handle dead f.torrents
-			var broken = false
 			for i, torrent := range f.torrents {
 				broken = false
-				for _, TorrentID := range f.broken_torrents {
+				for _, TorrentID := range f.brokenTorrents {
 					if torrent.ID == TorrentID {
 						broken = true
 					}
@@ -810,7 +811,6 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 		} else if f.opt.SharedFolder != "folders" || dirID != rootID {
 			//fmt.Printf("Matching Torrents to Direct Links ... ")
 			for i, torrent := range f.torrents {
-				var broken = false
 				if f.opt.SharedFolder == "folders" {
 					if dirID != torrent.ID {
 						continue
@@ -836,21 +836,21 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 							},
 							Parameters: f.baseParams(),
 						}
-						var err_code = 0
+						var errCode = 0
 						resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
 						if resp != nil {
-							err_code = resp.StatusCode
+							errCode = resp.StatusCode
 						}
-						if err_code == 503 {
+						if errCode == 503 {
 							broken = true
 							break
 						}
 						var retries = 0
-						for err_code == 429 && retries <= 5 {
+						for errCode == 429 && retries <= 5 {
 							time.Sleep(time.Duration(2) * time.Second)
 							resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
 							if resp != nil {
-								err_code = resp.StatusCode
+								errCode = resp.StatusCode
 							}
 							retries += 1
 						}
@@ -876,17 +876,17 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 							},
 							Parameters: f.baseParams(),
 						}
-						var err_code = 0
+						var errCode = 0
 						resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
 						if resp != nil {
-							err_code = resp.StatusCode
+							errCode = resp.StatusCode
 						}
 						var retries = 0
-						for err_code == 429 && retries <= 5 {
+						for errCode == 429 && retries <= 5 {
 							time.Sleep(time.Duration(2) * time.Second)
 							resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
 							if resp != nil {
-								err_code = resp.StatusCode
+								errCode = resp.StatusCode
 							}
 							retries += 1
 						}
@@ -920,17 +920,17 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			if err != nil {
 				break
 			}
-			
+
 			totalcount := 0
 			if tc := resp.Header.Get("X-Total-Count"); tc != "" {
 				totalcount, _ = strconv.Atoi(tc)
 			}
-			
+
 			result = append(result, partialresult...)
 			if totalcount == 0 || len(result) >= totalcount || len(partialresult) == 0 {
 				break
 			}
-			
+
 			page++
 			opts.Parameters.Set("page", strconv.Itoa(page))
 		}
@@ -1020,7 +1020,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // Creates from the parameters passed in a half finished Object which
 // must have setMetaData called on it
 //
-// Returns the object, leaf, directoryID and error
+// # Returns the object, leaf, directoryID and error
 //
 // Used to create new objects
 func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
@@ -1039,7 +1039,7 @@ func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time,
 
 // Put the object
 //
-// Copy the reader in to the new object which is returned
+// # Copy the reader in to the new object which is returned
 //
 // The new object may have been created if an error is returned
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -1057,9 +1057,9 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 
 // PutUnchecked the object into the container
 //
-// This will produce an error if the object already exists
+// # This will produce an error if the object already exists
 //
-// Copy the reader in to the new object which is returned
+// # Copy the reader in to the new object which is returned
 //
 // The new object may have been created if an error is returned
 func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -1143,9 +1143,9 @@ func (f *Fs) move(ctx context.Context, isFile bool, id, oldLeaf, newLeaf, oldDir
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// # This is stored with the remote path given
 //
-// It returns the destination Object and a possible error
+// # It returns the destination Object and a possible error
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1280,7 +1280,7 @@ func (o *Object) setMetaData(info *api.Item) (err error) {
 	o.id = info.ID
 	o.mimeType = info.MimeType
 	o.url = info.Link
-	o.OriginalUrl = info.OriginalLink
+	o.OriginalURL = info.OriginalLink
 	o.ParentID = info.ParentID
 	o.TorrentHash = info.TorrentHash
 	return nil
@@ -1301,7 +1301,6 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 }
 
 // ModTime returns the modification time of the object
-//
 //
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
@@ -1331,7 +1330,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	}
 	fs.FixRangeOption(options, o.size)
 	var resp *http.Response
-	var err_code = 0
+	var errCode = 0
 	opts := rest.Opts{
 		Path:    "",
 		RootURL: o.url,
@@ -1339,18 +1338,18 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		Options: options,
 	}
 	err = o.fs.pacer.Call(func() (bool, error) {
-		err_code = 0
+		errCode = 0
 		resp, err = o.fs.srv.Call(ctx, &opts)
 		if resp != nil {
-			err_code = resp.StatusCode
+			errCode = resp.StatusCode
 		}
 		return shouldRetry(ctx, resp, err)
 	})
 
 	if err != nil {
-		if o.OriginalUrl != "" && o.id != "" {
+		if o.OriginalURL != "" && o.id != "" {
 			fs.Infof(o, "Link %q is down, attempting live unrestrict of original link", o.url)
-			
+
 			// Delete the old link
 			delOpts := rest.Opts{
 				Method:     "DELETE",
@@ -1371,7 +1370,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 				Method: "POST",
 				Path:   "/unrestrict/link",
 				MultipartParams: url.Values{
-					"link": {o.OriginalUrl},
+					"link": {o.OriginalURL},
 				},
 				Parameters: o.fs.baseParams(),
 			}
@@ -1386,13 +1385,13 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 				o.url = unrestrictResult.Link
 				o.id = unrestrictResult.ID
 				opts.RootURL = o.url
-				
+
 				// Retry the original download call
 				err = o.fs.pacer.Call(func() (bool, error) {
-					err_code = 0
+					errCode = 0
 					resp, err = o.fs.srv.Call(ctx, &opts)
 					if resp != nil {
-						err_code = resp.StatusCode
+						errCode = resp.StatusCode
 					}
 					return shouldRetry(ctx, resp, err)
 				})
@@ -1402,10 +1401,10 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		}
 
 		if err != nil {
-			if err_code == 503 {
+			if errCode == 503 {
 				o.fs.mu.Lock()
 				alreadyBroken := false
-				for _, TorrentID := range o.fs.broken_torrents {
+				for _, TorrentID := range o.fs.brokenTorrents {
 					if o.ParentID == TorrentID {
 						alreadyBroken = true
 						break
@@ -1413,7 +1412,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 				}
 				if !alreadyBroken {
 					fs.Infof(o, "Link seems broken, marking torrent %s to be re-downloaded", o.ParentID)
-					o.fs.broken_torrents = append(o.fs.broken_torrents, o.ParentID)
+					o.fs.brokenTorrents = append(o.fs.brokenTorrents, o.ParentID)
 				}
 				o.fs.mu.Unlock()
 			}
@@ -1425,7 +1424,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 
 // Update the object with the contents of the io.Reader, modTime and size
 //
-// If existing is set then it updates the object rather than creating a new one
+// # If existing is set then it updates the object rather than creating a new one
 //
 // The new object may have been created if an error is returned
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
@@ -1447,16 +1446,16 @@ func (f *Fs) remove(ctx context.Context, id ...string) (err error) {
 	var resp *http.Response
 	var result api.Response
 	var retries = 0
-	var err_code = 0
+	var errCode = 0
 	resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
 	if resp != nil {
-		err_code = resp.StatusCode
+		errCode = resp.StatusCode
 	}
-	for err_code == 429 && retries <= 5 {
+	for errCode == 429 && retries <= 5 {
 		time.Sleep(time.Duration(2) * time.Second)
 		resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
 		if resp != nil {
-			err_code = resp.StatusCode
+			errCode = resp.StatusCode
 		}
 		retries += 1
 	}
@@ -1469,12 +1468,12 @@ func (f *Fs) remove(ctx context.Context, id ...string) (err error) {
 		}
 		var resp *http.Response
 		var result api.Response
-		var err_code = 0
+		var errCode = 0
 		resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
 		if resp != nil {
-			err_code = resp.StatusCode
+			errCode = resp.StatusCode
 		}
-		if err_code == 429 {
+		if errCode == 429 {
 			time.Sleep(time.Duration(2) * time.Second)
 			_, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
 		}
@@ -1494,9 +1493,8 @@ func (o *Object) Remove(ctx context.Context) error {
 	}
 	if o.ParentID != "" {
 		return o.fs.remove(ctx, o.id, o.ParentID)
-	} else {
-		return o.fs.remove(ctx, o.id)
 	}
+	return o.fs.remove(ctx, o.id)
 }
 
 // MimeType of an Object if known, "" otherwise

@@ -52,6 +52,7 @@ type Item struct {
 	TorrentHash     string       `json:"hash,omitempty"`
 }
 
+// File represents a file object
 type File struct {
 	ID       int64 `json:"id,omitempty"`
 	Selected int64 `json:"selected,omitempty"`
