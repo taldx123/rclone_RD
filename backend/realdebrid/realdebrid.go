@@ -69,7 +69,7 @@ var (
 	}
 )
 
-// Global lists of recieved content.
+// Global lists of received content.
 // Realdebrid content is provided in pages with 100 items per page.
 // To limit api calls all pages are stored here and are only updated on changes in the total length
 const interval int64 = 15 * 60
@@ -276,8 +276,9 @@ func (f *Fs) listTorrentStatusPage(ctx context.Context) ([]api.Item, error) {
 		var partialresult []api.Item
 		var resp *http.Response
 		err := f.pacer.Call(func() (bool, error) {
-			resp, err := f.srv.CallJSON(ctx, &opts, nil, &partialresult)
-			return shouldRetry(ctx, resp, err)
+			var errCall error
+			resp, errCall = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
+			return shouldRetry(ctx, resp, errCall)
 		})
 		if err != nil {
 			fs.Debugf(f, "RealDebrid API error: GET /torrents page=%d limit=100: %v", page, err)
@@ -430,7 +431,21 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if err != nil {
 		// Assume it is a file
 		newRoot, remote := dircache.SplitPath(root)
-		tempF := *f
+		tempF := Fs{
+			name:              f.name,
+			root:              newRoot,
+			opt:               f.opt,
+			features:          f.features,
+			srv:               f.srv,
+			pacer:             f.pacer,
+			tokenRenewer:      f.tokenRenewer,
+			cached:            f.cached,
+			torrents:          f.torrents,
+			brokenTorrents:    f.brokenTorrents,
+			lastcheck:         f.lastcheck,
+			torrentStatuses:   f.torrentStatuses,
+			torrentStatusBase: f.torrentStatusBase,
+		}
 		tempF.dirCache = dircache.New(newRoot, rootID, &tempF)
 		tempF.root = newRoot
 		// Make new Fs which is the parent
@@ -528,7 +543,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 			selectedFiles = append(selectedFiles, file.ID)
 		}
 	}
-	var selectedFiles_str = strings.Trim(strings.Join(strings.Fields(fmt.Sprint(selectedFiles)), ","), "[]")
+	var selectedFilesStr = strings.Trim(strings.Join(strings.Fields(fmt.Sprint(selectedFiles)), ","), "[]")
 	//Delete old download links
 	for _, link := range torrent.Links {
 		for i, cachedfile := range f.cached {
@@ -592,7 +607,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 		Method: method,
 		Path:   path,
 		MultipartParams: url.Values{
-			"files": {selectedFiles_str},
+		"files": {selectedFilesStr},
 		},
 		Parameters: f.baseParams(),
 	}
