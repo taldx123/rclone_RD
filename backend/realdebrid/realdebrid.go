@@ -667,7 +667,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			var totalcount int
 			var printed = false
 			page := 1
-			opts.Parameters.Set("limit", "2500")
+			opts.Parameters.Set("limit", "100")
 			opts.Parameters.Set("page", "1")
 			for {
 				partialresult = nil
@@ -719,7 +719,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			opts.Parameters.Set("limit", "1")
 			var newtorrents []api.Item
 			page = 1
-			opts.Parameters.Set("limit", "2500")
+			opts.Parameters.Set("limit", "100")
 			opts.Parameters.Set("page", "1")
 			for {
 				partialresult = nil
