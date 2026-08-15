@@ -745,7 +745,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			f.mu.Unlock()
 			//Handle dead f.torrents
 			for i, torrent := range f.torrents {
-				broken = false
+				broken := false
 				for _, TorrentID := range f.brokenTorrents {
 					if torrent.ID == TorrentID {
 						broken = true
@@ -811,6 +811,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 		} else if f.opt.SharedFolder != "folders" || dirID != rootID {
 			//fmt.Printf("Matching Torrents to Direct Links ... ")
 			for i, torrent := range f.torrents {
+				broken := false
 				if f.opt.SharedFolder == "folders" {
 					if dirID != torrent.ID {
 						continue
