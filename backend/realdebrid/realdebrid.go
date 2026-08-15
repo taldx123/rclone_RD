@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rclone/rclone/backend/realdebrid/api"
@@ -48,8 +49,8 @@ import (
 const (
 	rcloneClientID              = "X245A4XAIBGVM"
 	rcloneEncryptedClientSecret = "B5YIvQoRIhcpAYs8HYeyjb9gK-ftmZEbqdh_gNfc4RgO9Q"
-	minSleep                    = 10 * time.Millisecond
-	maxSleep                    = 2 * time.Second
+	minSleep                    = 250 * time.Millisecond // Align to RD limit of 240/minute
+	maxSleep                    = 3 * time.Second
 	decayConstant               = 2   // bigger for slower decay, exponential
 	rootID                      = "0" // ID of root folder is always this
 	rootURL                     = "https://api.real-debrid.com/rest/1.0"
@@ -71,11 +72,7 @@ var (
 //Global lists of recieved content.
 //Realdebrid content is provided in pages with 100 items per page.
 //To limit api calls all pages are stored here and are only updated on changes in the total length
-var cached []api.Item
-var torrents []api.Item
-var broken_torrents []string
-var lastcheck int64 = time.Now().Unix()
-var interval int64 = 15 * 60
+const interval int64 = 15 * 60
 
 // Register with Fs
 func init() {
@@ -89,9 +86,9 @@ func init() {
 			Default: "",
 		}, {
 			Name:     "download_mode",
-			Help:     `please choose which RealDebrid directory to serve: For the /downloads page, type "downloads". For the /torrents page, type "torrents". Default: "torrents"`,
+			Help:     `please choose which RealDebrid directory to serve: For the /downloads page, type "downloads". For the /torrents page, type "f.torrents". Default: "f.torrents"`,
 			Advanced: true,
-			Default:  "torrents",
+			Default:  "f.torrents",
 		}, {
 			Name:     "folder_mode",
 			Help:     `please choose wether files should be grouped in torrent folders, or all files should be displayed in the root directory. For all files in root type "files", for folder structure type "folders". Default: "folders"`,
@@ -140,6 +137,14 @@ type Fs struct {
 	dirCache     *dircache.DirCache // Map of directory path to directory id
 	pacer        *fs.Pacer          // pacer for API calls
 	tokenRenewer *oauthutil.Renew   // renew the token on expiry
+
+	mu                sync.Mutex
+	cached            []api.Item
+	torrents          []api.Item
+	broken_torrents   []string
+	lastcheck         int64
+	torrentStatuses   map[string]string
+	torrentStatusBase bool
 }
 
 // Object describes a file
@@ -154,6 +159,7 @@ type Object struct {
 	mimeType    string    // Mime type of object
 	url         string    // URL to download file
 	TorrentHash string    // Torrent Hash
+	OriginalUrl string    // Original link
 }
 
 // ------------------------------------------------------------
@@ -255,6 +261,119 @@ func (f *Fs) baseParams() url.Values {
 	return params
 }
 
+func (f *Fs) listTorrentStatusPage(ctx context.Context) ([]api.Item, error) {
+	params := f.baseParams()
+	params.Set("limit", "100")
+	page := 1
+	var allItems []api.Item
+	for {
+		params.Set("page", strconv.Itoa(page))
+		opts := rest.Opts{
+			Method:     "GET",
+			Path:       "/f.torrents",
+			Parameters: params,
+		}
+		var partialresult []api.Item
+		var resp *http.Response
+		err := f.pacer.Call(func() (bool, error) {
+			resp, err := f.srv.CallJSON(ctx, &opts, nil, &partialresult)
+			return shouldRetry(ctx, resp, err)
+		})
+		if err != nil {
+			fs.Debugf(f, "RealDebrid API error: GET /torrents page=%d limit=100: %v", page, err)
+			return nil, err
+		}
+		
+		totalcount := 0
+		if tc := resp.Header.Get("X-Total-Count"); tc != "" {
+			totalcount, _ = strconv.Atoi(tc)
+		}
+
+		allItems = append(allItems, partialresult...)
+		if totalcount == 0 || len(allItems) >= totalcount || len(partialresult) == 0 {
+			break
+		}
+		page++
+	}
+	return allItems, nil
+}
+
+// ChangeNotify watches RealDebrid torrent statuses at the rclone poll interval.
+func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
+	go f.changeNotify(ctx, notifyFunc, pollIntervalChan)
+}
+
+func (f *Fs) changeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
+	var ticker *time.Ticker
+	var tickerC <-chan time.Time
+	for {
+		select {
+		case pollInterval, ok := <-pollIntervalChan:
+			if !ok {
+				if ticker != nil {
+					ticker.Stop()
+				}
+				return
+			}
+			if ticker != nil {
+				ticker.Stop()
+				ticker, tickerC = nil, nil
+			}
+			if pollInterval > 0 {
+				ticker = time.NewTicker(pollInterval)
+				tickerC = ticker.C
+				fs.Infof(f, "RealDebrid torrent polling enabled: interval=%v", pollInterval)
+			} else {
+				fs.Infof(f, "RealDebrid torrent polling disabled")
+			}
+		case <-tickerC:
+			items, err := f.listTorrentStatusPage(ctx)
+			if err != nil {
+				fs.Debugf(f, "RealDebrid torrent polling failed: %v", err)
+				continue
+			}
+			current := make(map[string]string, len(items))
+			downloadedTransitions := 0
+			f.mu.Lock()
+			baseline := !f.torrentStatusBase
+			for _, item := range items {
+				if item.ID == "" {
+					continue
+				}
+				status := strings.ToLower(strings.TrimSpace(item.Status))
+				current[item.ID] = status
+				if baseline || status != "downloaded" {
+					continue
+				}
+				if previous := f.torrentStatuses[item.ID]; previous != "downloaded" {
+					downloadedTransitions++
+				}
+			}
+			f.torrentStatuses = current
+			f.torrentStatusBase = true
+			f.mu.Unlock()
+			
+			if downloadedTransitions > 0 {
+				fs.Infof(f, "RealDebrid torrent polling detected downloaded torrent(s): count=%d", downloadedTransitions)
+				// Force next listAll to hit the API by resetting lastcheck
+				f.lastcheck = 0 
+				
+				notifyFunc("", fs.EntryDirectory)
+				if f.opt.SharedFolder == "folders" {
+					notifyFunc("shows", fs.EntryDirectory)
+					notifyFunc("movies", fs.EntryDirectory)
+					notifyFunc("default", fs.EntryDirectory)
+				}
+			}
+		case <-ctx.Done():
+			if ticker != nil {
+				ticker.Stop()
+			}
+			return
+		}
+	}
+}
+
 // NewFs constructs an Fs from the path, container:path
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
@@ -281,13 +400,15 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		name:  name,
 		root:  root,
 		opt:   *opt,
-		srv:   rest.NewClient(client).SetRoot(rootURL),
-		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		srv:             rest.NewClient(client).SetRoot(rootURL),
+		pacer:           fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		torrentStatuses: make(map[string]string),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
 		CanHaveEmptyDirectories: true,
 		ReadMimeType:            true,
+		ChangeNotify:            f.ChangeNotify,
 	}).Fill(ctx, f)
 	f.srv.SetErrorHandler(errorHandler)
 
@@ -391,7 +512,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 	fmt.Println("Redownloading dead torrent: " + torrent.Name)
 	//Get dead torrent file and hash info
 	var method = "GET"
-	var path = "/torrents/info/" + torrent.ID
+	var path = "/f.torrents/info/" + torrent.ID
 	var opts = rest.Opts{
 		Method:     method,
 		Path:       path,
@@ -408,7 +529,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 	var selected_files_str = strings.Trim(strings.Join(strings.Fields(fmt.Sprint(selected_files)), ","), "[]")
 	//Delete old download links
 	for _, link := range torrent.Links {
-		for i, cachedfile := range cached {
+		for i, cachedfile := range f.cached {
 			if cachedfile.OriginalLink == link {
 				path = "/downloads/delete/" + cachedfile.ID
 				opts = rest.Opts{
@@ -432,12 +553,12 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 					}
 					retries += 1
 				}
-				cached[i].OriginalLink = "this-is-not-a-link"
+				f.cached[i].OriginalLink = "this-is-not-a-link"
 			}
 		}
 	}
 	//Add torrent again
-	path = "/torrents/addMagnet"
+	path = "/f.torrents/addMagnet"
 	method = "POST"
 	opts = rest.Opts{
 		Method: method,
@@ -449,7 +570,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 	}
 	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
 	method = "GET"
-	path = "/torrents/info/" + torrent.ID
+	path = "/f.torrents/info/" + torrent.ID
 	opts = rest.Opts{
 		Method:     method,
 		Path:       path,
@@ -463,7 +584,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 		tries += 1
 	}
 	//Select the same files again
-	path = "/torrents/selectFiles/" + torrent.ID
+	path = "/f.torrents/selectFiles/" + torrent.ID
 	method = "POST"
 	opts = rest.Opts{
 		Method: method,
@@ -484,11 +605,13 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 	}
 	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
 	torrent.Status = "downloaded"
-	lastcheck = time.Now().Unix() - interval
-	for i, TorrentID := range broken_torrents {
+	f.mu.Lock()
+	f.lastcheck = time.Now().Unix() - interval
+	f.mu.Unlock()
+	for i, TorrentID := range f.broken_torrents {
 		if dead_torrent_id == TorrentID {
-			broken_torrents[i] = broken_torrents[len(broken_torrents)-1]
-			broken_torrents = broken_torrents[:len(broken_torrents)-1]
+			f.broken_torrents[i] = f.broken_torrents[len(f.broken_torrents)-1]
+			f.broken_torrents = f.broken_torrents[:len(f.broken_torrents)-1]
 		}
 	}
 	return torrent
@@ -526,50 +649,51 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			var newcached []api.Item
 			var totalcount int
 			var printed = false
-			totalcount = 2
-			for len(newcached) < totalcount {
+			page := 1
+			opts.Parameters.Set("limit", "2500")
+			opts.Parameters.Set("page", "1")
+			for {
 				partialresult = nil
-				var err_code = 0
-				resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
-				if resp != nil {
-					err_code = resp.StatusCode
-				}
-				var retries = 0
-				for err_code == 429 && retries <= 5 {
-					partialresult = nil
-					time.Sleep(time.Duration(2) * time.Second)
+				err = f.pacer.Call(func() (bool, error) {
 					resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
-					if resp != nil {
-						err_code = resp.StatusCode
-					}
-					retries += 1
-				}
-				if err == nil {
-					totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
-					if err == nil {
-						if totalcount != len(cached) || time.Now().Unix()-lastcheck > interval {
-							if time.Now().Unix()-lastcheck > interval && !printed {
-								fmt.Println("Last update more than 15min ago. Updating links and torrents.")
-								printed = true
-							}
-							newcached = append(newcached, partialresult...)
-							opts.Parameters.Set("offset", strconv.Itoa(len(newcached)))
-							opts.Parameters.Set("limit", "2500")
-						} else {
-							newcached = cached
-						}
-					} else {
-						break
-					}
-				} else {
+					return shouldRetry(ctx, resp, err)
+				})
+
+				if err != nil {
+					fs.Debugf(f, "Failed to get downloads page %d: %v", page, err)
 					break
 				}
+
+				totalcount = 0
+				if tc := resp.Header.Get("X-Total-Count"); tc != "" {
+					totalcount, _ = strconv.Atoi(tc)
+				}
+
+				if totalcount > 0 && totalcount == len(f.cached) && time.Now().Unix()-f.lastcheck <= interval {
+					newcached = f.cached
+					break
+				}
+
+				if time.Now().Unix()-f.lastcheck > interval && !printed {
+					fs.Infof(f, "Last update more than 15min ago. Updating links and f.torrents.")
+					printed = true
+				}
+
+				newcached = append(newcached, partialresult...)
+				if (totalcount > 0 && len(newcached) >= totalcount) || len(partialresult) == 0 {
+					break
+				}
+
+				page++
+				opts.Parameters.Set("page", strconv.Itoa(page))
 			}
 			//fmt.Printf("Done.\n")
 			//fmt.Printf("Updating RealDebrid Torrents ... ")
-			cached = newcached
-			//get torrents
-			path = "/torrents"
+			f.mu.Lock()
+			f.cached = newcached
+			f.mu.Unlock()
+			//get f.torrents
+			path = "/f.torrents"
 			opts = rest.Opts{
 				Method:     method,
 				Path:       path,
@@ -577,55 +701,57 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			}
 			opts.Parameters.Set("limit", "1")
 			var newtorrents []api.Item
-			totalcount = 2
-			for len(newtorrents) < totalcount {
+			page = 1
+			opts.Parameters.Set("limit", "2500")
+			opts.Parameters.Set("page", "1")
+			for {
 				partialresult = nil
-				var err_code = 0
-				resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
-				if resp != nil {
-					err_code = resp.StatusCode
-				}
-				var retries = 0
-				for err_code == 429 && retries <= 5 {
-					partialresult = nil
-					time.Sleep(time.Duration(2) * time.Second)
+				err = f.pacer.Call(func() (bool, error) {
 					resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
-					if resp != nil {
-						err_code = resp.StatusCode
-					}
-					retries += 1
-				}
-				if err == nil {
-					totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
-					if err == nil {
-						if totalcount != len(torrents) || time.Now().Unix()-lastcheck > interval {
-							newtorrents = append(newtorrents, partialresult...)
-							opts.Parameters.Set("offset", strconv.Itoa(len(newtorrents)))
-							opts.Parameters.Set("limit", "2500")
-						} else {
-							newtorrents = torrents
-						}
-					} else {
-						break
-					}
-				} else {
+					return shouldRetry(ctx, resp, err)
+				})
+
+				if err != nil {
+					fs.Debugf(f, "Failed to get torrents page %d: %v", page, err)
 					break
 				}
+
+				totalcount = 0
+				if tc := resp.Header.Get("X-Total-Count"); tc != "" {
+					totalcount, _ = strconv.Atoi(tc)
+				}
+
+				if totalcount > 0 && totalcount == len(f.torrents) && time.Now().Unix()-f.lastcheck <= interval {
+					newtorrents = f.torrents
+					break
+				}
+
+				newtorrents = append(newtorrents, partialresult...)
+				if (totalcount > 0 && len(newtorrents) >= totalcount) || len(partialresult) == 0 {
+					break
+				}
+
+				page++
+				opts.Parameters.Set("page", strconv.Itoa(page))
 			}
-			lastcheck = time.Now().Unix()
+			f.mu.Lock()
+			f.lastcheck = time.Now().Unix()
+			f.mu.Unlock()
 			//fmt.Printf("Done.\n")
-			torrents = newtorrents
-			//Handle dead torrents
+			f.mu.Lock()
+			f.torrents = newtorrents
+			f.mu.Unlock()
+			//Handle dead f.torrents
 			var broken = false
-			for i, torrent := range torrents {
+			for i, torrent := range f.torrents {
 				broken = false
-				for _, TorrentID := range broken_torrents {
+				for _, TorrentID := range f.broken_torrents {
 					if torrent.ID == TorrentID {
 						broken = true
 					}
 				}
 				if torrent.Status == "dead" || broken {
-					torrents[i] = f.redownloadTorrent(ctx, torrent)
+					f.torrents[i] = f.redownloadTorrent(ctx, torrent)
 				}
 			}
 			if f.opt.SharedFolder == "folders" {
@@ -650,7 +776,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			var artificialType []api.Item
 			if dirID == "shows" {
 				r, _ := regexp.Compile(f.opt.RegexShows) //(?i)(S[0-9]{2}|SEASON|COMPLETE)
-				for _, torrent := range torrents {
+				for _, torrent := range f.torrents {
 					match := r.MatchString(torrent.Name)
 					if match {
 						artificialType = append(artificialType, torrent)
@@ -660,7 +786,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			} else if dirID == "movies" {
 				r, _ := regexp.Compile(f.opt.RegexMovies) //`(?i)([0-9]{4} ?\.?)`
 				nr, _ := regexp.Compile(f.opt.RegexShows)
-				for _, torrent := range torrents {
+				for _, torrent := range f.torrents {
 					match := r.MatchString(torrent.Name)
 					exclude := nr.MatchString(torrent.Name)
 					if match && !exclude {
@@ -671,7 +797,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			} else {
 				r, _ := regexp.Compile(f.opt.RegexMovies)
 				nr, _ := regexp.Compile(f.opt.RegexShows)
-				for _, torrent := range torrents {
+				for _, torrent := range f.torrents {
 					match := r.MatchString(torrent.Name)
 					exclude := nr.MatchString(torrent.Name)
 					if !match && !exclude {
@@ -683,7 +809,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 
 		} else if f.opt.SharedFolder != "folders" || dirID != rootID {
 			//fmt.Printf("Matching Torrents to Direct Links ... ")
-			for i, torrent := range torrents {
+			for i, torrent := range f.torrents {
 				var broken = false
 				if f.opt.SharedFolder == "folders" {
 					if dirID != torrent.ID {
@@ -692,7 +818,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				}
 				for _, link := range torrent.Links {
 					var ItemFile api.Item
-					for _, cachedfile := range cached {
+					for _, cachedfile := range f.cached {
 						if cachedfile.OriginalLink == link {
 							ItemFile = cachedfile
 							break
@@ -735,8 +861,8 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					result = append(result, ItemFile)
 				}
 				if broken {
-					torrents[i] = f.redownloadTorrent(ctx, torrent)
-					torrent = torrents[i]
+					f.torrents[i] = f.redownloadTorrent(ctx, torrent)
+					torrent = f.torrents[i]
 					for _, link := range torrent.Links {
 						var ItemFile api.Item
 						//fmt.Printf("Creating new unrestricted direct link for: '%s'\n", torrent.Name)
@@ -782,25 +908,32 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			Path:       path,
 			Parameters: f.baseParams(),
 		}
-		err = f.pacer.Call(func() (bool, error) {
-			var totalcount int
-			totalcount = 1
-			for len(result) < totalcount {
+		page := 1
+		opts.Parameters.Set("limit", "100") // realdebrid supports max 100/2500 per type
+		opts.Parameters.Set("page", "1")
+		for {
+			partialresult = nil
+			err = f.pacer.Call(func() (bool, error) {
 				resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
-				if err == nil {
-					totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
-					if err == nil {
-						result = append(result, partialresult...)
-						opts.Parameters.Set("offset", strconv.Itoa(len(result)))
-					} else {
-						break
-					}
-				} else {
-					break
-				}
+				return shouldRetry(ctx, resp, err)
+			})
+			if err != nil {
+				break
 			}
-			return shouldRetry(ctx, resp, err)
-		})
+			
+			totalcount := 0
+			if tc := resp.Header.Get("X-Total-Count"); tc != "" {
+				totalcount, _ = strconv.Atoi(tc)
+			}
+			
+			result = append(result, partialresult...)
+			if totalcount == 0 || len(result) >= totalcount || len(partialresult) == 0 {
+				break
+			}
+			
+			page++
+			opts.Parameters.Set("page", strconv.Itoa(page))
+		}
 	}
 	if err != nil {
 		return newDirID, found, fmt.Errorf("couldn't list files: %w", err)
@@ -1147,6 +1280,7 @@ func (o *Object) setMetaData(info *api.Item) (err error) {
 	o.id = info.ID
 	o.mimeType = info.MimeType
 	o.url = info.Link
+	o.OriginalUrl = info.OriginalLink
 	o.ParentID = info.ParentID
 	o.TorrentHash = info.TorrentHash
 	return nil
@@ -1205,24 +1339,86 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		Options: options,
 	}
 	err = o.fs.pacer.Call(func() (bool, error) {
+		err_code = 0
 		resp, err = o.fs.srv.Call(ctx, &opts)
 		if resp != nil {
 			err_code = resp.StatusCode
 		}
 		return shouldRetry(ctx, resp, err)
 	})
+
 	if err != nil {
-		if err_code == 503 {
-			for _, TorrentID := range broken_torrents {
-				if o.ParentID == TorrentID {
-					return nil, err
-				}
+		if o.OriginalUrl != "" && o.id != "" {
+			fs.Infof(o, "Link %q is down, attempting live unrestrict of original link", o.url)
+			
+			// Delete the old link
+			delOpts := rest.Opts{
+				Method:     "DELETE",
+				Path:       "/downloads/delete/" + o.id,
+				Parameters: o.fs.baseParams(),
 			}
-			fmt.Println("Error opening file: '" + o.url + "'.")
-			fmt.Println("This link seems to be broken. Torrent will be re-downloaded on next refresh.")
-			broken_torrents = append(broken_torrents, o.ParentID)
+			var delResult api.Response
+			delErr := o.fs.pacer.Call(func() (bool, error) {
+				delResp, delErrInner := o.fs.srv.CallJSON(ctx, &delOpts, nil, &delResult)
+				return shouldRetry(ctx, delResp, delErrInner)
+			})
+			if delErr != nil {
+				fs.Debugf(o, "Warning: failed to delete old link %q: %v", o.id, delErr)
+			}
+
+			// Unrestrict the original link
+			unrestrictOpts := rest.Opts{
+				Method: "POST",
+				Path:   "/unrestrict/link",
+				MultipartParams: url.Values{
+					"link": {o.OriginalUrl},
+				},
+				Parameters: o.fs.baseParams(),
+			}
+			var unrestrictResult api.Item
+			unrestrictErr := o.fs.pacer.Call(func() (bool, error) {
+				unrResp, unrErr := o.fs.srv.CallJSON(ctx, &unrestrictOpts, nil, &unrestrictResult)
+				return shouldRetry(ctx, unrResp, unrErr)
+			})
+
+			if unrestrictErr == nil && unrestrictResult.Link != "" {
+				fs.Infof(o, "Live unrestrict successful, updating URL and retrying")
+				o.url = unrestrictResult.Link
+				o.id = unrestrictResult.ID
+				opts.RootURL = o.url
+				
+				// Retry the original download call
+				err = o.fs.pacer.Call(func() (bool, error) {
+					err_code = 0
+					resp, err = o.fs.srv.Call(ctx, &opts)
+					if resp != nil {
+						err_code = resp.StatusCode
+					}
+					return shouldRetry(ctx, resp, err)
+				})
+			} else {
+				fs.Errorf(o, "Live unrestrict failed: %v", unrestrictErr)
+			}
 		}
-		return nil, err
+
+		if err != nil {
+			if err_code == 503 {
+				o.fs.mu.Lock()
+				alreadyBroken := false
+				for _, TorrentID := range o.fs.broken_torrents {
+					if o.ParentID == TorrentID {
+						alreadyBroken = true
+						break
+					}
+				}
+				if !alreadyBroken {
+					fs.Infof(o, "Link seems broken, marking torrent %s to be re-downloaded", o.ParentID)
+					o.fs.broken_torrents = append(o.fs.broken_torrents, o.ParentID)
+				}
+				o.fs.mu.Unlock()
+			}
+			return nil, err
+		}
 	}
 	return resp.Body, err
 }
@@ -1283,7 +1479,9 @@ func (f *Fs) remove(ctx context.Context, id ...string) (err error) {
 			_, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
 		}
 	}
-	lastcheck = time.Now().Unix() - interval
+	f.mu.Lock()
+	f.lastcheck = time.Now().Unix() - interval
+	f.mu.Unlock()
 	return nil
 }
 
