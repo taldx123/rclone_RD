@@ -1,8 +1,10 @@
 # RClone_RD (Real-Debrid Fork)
 
-This RClone fork contains a Real-Debrid backend implementation allowing you to serve your RealDebrid /torrents directory as a virtual drive.
+This RClone fork contains a Real-Debrid backend implementation allowing you
+to serve your RealDebrid /torrents directory as a virtual drive.
 
-## Setting up the remote:
+## Setting up the remote
+
 1. Run `rclone config`
 2. Create a new remote (`n`) and name it
 3. Choose `realdebrid` as the remote type
@@ -10,7 +12,9 @@ This RClone fork contains a Real-Debrid backend implementation allowing you to s
 5. Mount: `rclone mount your-remote: /path/to/mount --dir-cache-time 10s`
 
 ## Development & Docker
+
 Build and test locally without installing Go using Docker Compose:
+
 - **Build:** `docker compose run --rm dev make`
 - **Test:** `docker compose run --rm dev make quicktest`
 - **Shell:** `docker compose run --rm dev bash`
@@ -35,7 +39,7 @@ Build and test locally without installing Go using Docker Compose:
 [![GoDoc](https://godoc.org/github.com/rclone/rclone?status.svg)](https://godoc.org/github.com/rclone/rclone)
 [![Docker Pulls](https://img.shields.io/docker/pulls/rclone/rclone)](https://hub.docker.com/r/rclone/rclone)
 
-# Rclone
+## About Rclone
 
 Rclone *("rsync for cloud storage")* is a command-line program to sync files and
 directories to and from different cloud storage providers.
