@@ -89,6 +89,11 @@ func init() {
 			Advanced: true,
 			Default:  "torrents",
 		}, {
+			Name:     "torrent_name_format",
+			Help:     `please choose how torrents folders should be named. For default name, type "name". To append the torrent ID, type "name_id". To only use the torrent ID, type "id". Default: "name"`,
+			Advanced: true,
+			Default:  "name",
+		}, {
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
 			Advanced: true,
@@ -103,9 +108,10 @@ func init() {
 
 // Options defines the configuration for this backend
 type Options struct {
-	RootFolderID string               `config:"download_mode"`
-	APIKey       string               `config:"api_key"`
-	Enc          encoder.MultiEncoder `config:"encoding"`
+	RootFolderID      string               `config:"download_mode"`
+	APIKey            string               `config:"api_key"`
+	TorrentNameFormat string               `config:"torrent_name_format"`
+	Enc               encoder.MultiEncoder `config:"encoding"`
 }
 
 // Fs represents a remote cloud storage system
@@ -557,7 +563,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 		Method: method,
 		Path:   path,
 		MultipartParams: url.Values{
-			"magnet": {"magnet:?xt=urn:btih:" + torrent.TorrentHash},
+			"magnet": []string{"magnet:?xt=urn:btih:" + torrent.TorrentHash},
 		},
 		Parameters: f.baseParams(),
 	}
@@ -583,7 +589,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 		Method: method,
 		Path:   path,
 		MultipartParams: url.Values{
-			"files": {selectedFilesStr},
+			"files": []string{selectedFilesStr},
 		},
 		Parameters: f.baseParams(),
 	}
@@ -770,7 +776,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 							Method: method,
 							Path:   path,
 							MultipartParams: url.Values{
-								"link": {link},
+								"link": []string{link},
 							},
 							Parameters: f.baseParams(),
 						}
@@ -810,7 +816,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 							Method: method,
 							Path:   path,
 							MultipartParams: url.Values{
-								"link": {link},
+								"link": []string{link},
 							},
 							Parameters: f.baseParams(),
 						}
@@ -902,6 +908,14 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			continue
 		}
 		item.Name = f.opt.Enc.ToStandardName(item.Name)
+		if dirID == rootID && f.opt.RootFolderID == "torrents" {
+			switch f.opt.TorrentNameFormat {
+			case "name_id":
+				item.Name = fmt.Sprintf("%s - [%s]", item.Name, item.ID)
+			case "id":
+				item.Name = item.ID
+			}
+		}
 		if fn(item) {
 			found = true
 			break
@@ -1306,7 +1320,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 				Method: "POST",
 				Path:   "/unrestrict/link",
 				MultipartParams: url.Values{
-					"link": {o.OriginalURL},
+					"link": []string{o.OriginalURL},
 				},
 				Parameters: o.fs.baseParams(),
 			}

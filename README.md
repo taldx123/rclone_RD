@@ -11,6 +11,100 @@ to serve your RealDebrid /torrents directory as a virtual drive.
 4. Follow instructions (choose no advanced config)
 5. Mount: `rclone mount your-remote: /path/to/mount --dir-cache-time 10s`
 
+## Configuration Options
+
+When configuring the remote via `rclone config` (by choosing advanced options)
+or by editing your `rclone.conf` directly, you can set the following options:
+
+### `api_key`
+
+Your Real-Debrid API Key. This is required to access your account.
+
+### `download_mode`
+
+Choose which Real-Debrid directory to serve.
+
+- `torrents` (Default): Serves the `/torrents` page, which represents your cloud
+  torrents.
+- `downloads`: Serves the `/downloads` page, which represents your unrestricted
+  links.
+
+### `torrent_name_format`
+
+If you have multiple torrents with the exact same name, rclone may only show
+one of them in the mounted directory since it maps files by name. To resolve
+this, you can configure how folder names are generated for torrents.
+
+- `name` (Default): Uses the original torrent name. Duplicates will overwrite
+  each other.
+- `name_id`: Appends the Real-Debrid Torrent ID to the folder name (e.g.,
+  `MyMovie - [A1B2C3D4]`). **Recommended to prevent duplicate collisions.**
+- `id`: Uses only the Real-Debrid Torrent ID as the folder name.
+
+### `encoding`
+
+Configures the string encoding used by the backend. It's generally recommended
+to leave this as default.
+
+Example `rclone.conf` entry:
+
+```ini
+[realdebrid]
+type = realdebrid
+api_key = your-api-key
+download_mode = torrents
+torrent_name_format = name_id
+```
+
+## Docker Usage
+
+### Docker Compose Service Example
+
+You can run this rclone fork as a docker container to mount your Real-Debrid
+drive directly to your host file system. Note that you must build the docker
+image from this repository first or use your custom built image.
+
+```yaml
+services:
+  rclone-rd:
+    image: your-custom-rclone-rd-image:latest
+    container_name: rclone-rd
+    restart: unless-stopped
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - /path/to/your/rclone.conf:/config/rclone/rclone.conf:ro
+      - /path/to/local/mount:/data:shared
+    command: mount realdebrid: /data --dir-cache-time 10s --allow-other --vfs-cache-mode off
+```
+
+### Docker Volume Plugin Spec
+
+You can also use the [rclone Docker Volume Plugin](https://rclone.org/docker/)
+to mount your Real-Debrid drive directly into other containers (like Plex,
+Radarr, or Jellyfin) without mounting it to the host system first.
+
+```yaml
+services:
+  plex:
+    image: plexinc/pms-docker
+    volumes:
+      - realdebrid_media:/media
+
+volumes:
+  realdebrid_media:
+    driver: rclone/docker-volume-rclone:latest
+    driver_opts:
+      remote: realdebrid:
+      allow_other: "true"
+      dir_cache_time: "10s"
+      vfs_cache_mode: "off"
+```
+
 ## Development & Docker
 
 Build and test locally without installing Go using Docker Compose:
